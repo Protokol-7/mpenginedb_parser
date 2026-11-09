@@ -29,7 +29,7 @@ next to this script (mitre_attack.json, asr_rules.json, vdm_catalog.json).
 import argparse, collections, csv, datetime, hashlib, json, logging, os, re, sqlite3, struct, sys, time
 
 TOOL = 'mpenginedb_parser'
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 PS_DEFAULT = 4096
 MAGIC = b'SQLite format 3\x00'
 
@@ -466,6 +466,39 @@ def describe_event(table, d):
     obj = next((d[k] for k in ('FilePath', 'Path', 'Name', 'FileName', 'ImageFileName', 'Identifier', 'FirewallRuleName') if d.get(k)), '')
     return 'Row in %s' % table, obj
 
+# --------------------------------------------------------------------------- recovered-row CSV expansion
+
+def recovered_csv_columns(rows):
+    """Expand JSON object keys into CSV columns without losing the original JSON.
+
+    The first five columns retain their original names/order for compatibility.
+    JSON fields are collected from all recovered tables, so differing schemas
+    get blank cells rather than losing information. Unparseable/non-object JSON
+    is left in 'Decoded row (JSON)' with the new columns blank.
+    """
+    base = ['Method', 'Record quality', 'Location', 'Table', 'Decoded row (JSON)']
+    fields, seen, parsed_rows = [], set(base), []
+    for row in rows:
+        try:
+            obj = json.loads(row[4])
+        except (TypeError, ValueError):
+            obj = None
+        parsed = {}
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                # Avoid clobbering export metadata with identically named fields.
+                col = key if key not in base else 'Row ' + key
+                if col not in seen:
+                    fields.append(col)
+                    seen.add(col)
+                # Nested values remain valid JSON inside a single CSV cell.
+                parsed[col] = (json.dumps(value, ensure_ascii=False)
+                               if isinstance(value, (dict, list, bool)) else value)
+        parsed_rows.append(parsed)
+    return (base + fields,
+            [list(row) + [parsed.get(k, '') for k in fields]
+             for row, parsed in zip(rows, parsed_rows)])
+
 # --------------------------------------------------------------------------- main work
 
 class Parser:
@@ -648,7 +681,8 @@ class Parser:
             q = plausibility(cols, vals) if how.startswith('carved') else 'consistent (complete row from a committed state)'
             rec_rows.append([how, q, where, t, json.dumps(d, ensure_ascii=False, default=str)])
             self.timeline_rows(t, d, 'RECOVERED (%s%s)' % (how, '' if q.startswith('consistent') else '; ' + q), tl)
-        self.wcsv('recovered_rows.csv', ['Method', 'Record quality', 'Location', 'Table', 'Decoded row (JSON)'], rec_rows)
+        rec_header, rec_csv_rows = recovered_csv_columns(rec_rows)
+        self.wcsv('recovered_rows.csv', rec_header, rec_csv_rows)
         self.summary['recovered_partially_overwritten'] = sum(1 for x in rec_rows if not x[1].startswith('consistent'))
         self.wcsv('row_history.csv', ['Table', 'First state', 'Last state', 'Status', 'Row (JSON)'],
                   [[t, a1, b1, s, json.dumps(list(r), default=lambda x: x.hex() if isinstance(x, bytes) else str(x))] for t, r, a1, b1, s in hist])
