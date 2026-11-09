@@ -16,7 +16,7 @@ Python 3.8 or newer. Standard library only.
 ## Usage
 
 ```
-python3 mpenginedb_parser.py -f <mpenginedb.db or folder> -o <output folder>
+python3 mpenginedb_parser.py -f "...\mpenginedb.db" --wal "..\mpenginedb.db~wal" -o <output folder>
 ```
 
 | Option | Meaning |
