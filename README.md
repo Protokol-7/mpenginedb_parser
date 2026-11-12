@@ -27,7 +27,7 @@ python3 mpenginedb_parser.py -f "...\mpenginedb.db" --wal "..\mpenginedb.db~wal"
 | `--keep-states` | keep the rebuilt database of every WAL commit |
 | `--no-carve` | skip carving of deleted records |
 | `--all-tables` | also write CSV files for empty tables |
-| `--derive-key` | ignore the built-in key and recover the keystream from the evidence only |
+| `--derive-key` | ignore the built-in key and recover the keystream from the evidence only (see note below, don't use this by default) |
 
 Collect the `-wal` file together with the database. Without it the newest changes are missing.
 
@@ -51,7 +51,7 @@ Collect the `-wal` file together with the database. Without it the newest change
 
 - Inputs are only read. MD5, SHA-1 and SHA-256 are taken before the run and SHA-256 again after it. `evidence_unchanged` in `summary.json` confirms the result.
 - The WAL is validated with SQLite's own rules on the stored bytes (salts and checksum chain). Frames after a break or after the last commit are not applied but are still carved.
-- With `--derive-key` the key comes from the evidence alone (known header plus zero-filled free space). It gives the same result as the built-in key, which you can show in court without relying on the tool's embedded data.
+- With `--derive-key` the key comes from the evidence alone (known header plus zero-filled free space), by default the tool tries the known built-in keys first and only falls back to this if none match. We added `--derive-key` so you can show the result doesn't depend on anything shipped with the tool, not as something to run by default. It's a statistical guess, voting on the most common byte at each position across the file's free space, and on a database with little free space it can land on a wrong byte for some positions while still passing the page 1 header check, which only confirms the first 16 bytes. You'll see a warning in the log telling you how many byte positions had a weak majority, the higher that number the less you should trust the result. If a known key already matches your engine build, that's the one to use, only reach for `--derive-key` when you're on a build with no known key at all.
 
 ## Decoding
 
