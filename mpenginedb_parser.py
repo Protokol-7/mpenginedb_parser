@@ -29,7 +29,7 @@ next to this script (mitre_attack.json, asr_rules.json, vdm_catalog.json).
 import argparse, collections, csv, datetime, hashlib, json, logging, os, re, sqlite3, struct, sys, time
 
 TOOL = 'mpenginedb_parser'
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 PS_DEFAULT = 4096
 MAGIC = b'SQLite format 3\x00'
 
@@ -181,8 +181,19 @@ def derive_keystream(pages, frames, ps):
         pe = (12 if t in (2, 5) else 8) + 2 * n
         if pe <= cs <= ps:
             for i in range(pe, cs): votes[i][p[i]] += 1
+    unvoted = low_confidence = 0
     for i in range(8, ps):
-        if votes[i]: key[i] = votes[i].most_common(1)[0][0]
+        if votes[i]:
+            (val, n1), total = votes[i].most_common(1)[0], sum(votes[i].values())
+            key[i] = val
+            if total < 3 or n1 / total < 0.75: low_confidence += 1
+        else:
+            unvoted += 1
+    if unvoted or low_confidence:
+        log.warning('derive-key: %d of %d byte positions had no vote (left at the whole-file most-common-byte '
+                    'default), %d had a weak majority (<3 samples or <75%% agreement); recovered keystream may '
+                    'be unreliable at those offsets, especially on databases with little free page space',
+                    unvoted, ps - 8, low_confidence)
     key[:8] = kp[:8]
     return bytes(key)
 
@@ -583,12 +594,28 @@ class Parser:
         rows_by_state = []; schema = {}
         for sid, desc, p in state_files:
             c = sqlite3.connect('file:%s?mode=ro&immutable=1' % p, uri=True)
-            ic = c.execute('pragma integrity_check').fetchone()[0]
+            c.text_factory = lambda b: b.decode('utf-8', 'replace')
+            try:
+                ic = c.execute('pragma integrity_check').fetchone()[0]
+            except (sqlite3.DatabaseError, UnicodeDecodeError) as e:
+                ic = 'error: %s' % e
             log.info('state %s (%s): integrity_check %s', sid, desc, ic)
+            if ic != 'ok':
+                log.warning('state %s: integrity_check did not pass; affected tables/rows in this state are '
+                            'skipped below rather than failing the whole run, other states are unaffected', sid)
             st = {}
-            for (t,) in c.execute("select name from sqlite_master where type='table' order by name"):
-                cu = c.execute('select * from "%s"' % t)
-                schema[t] = [x[0] for x in cu.description]; st[t] = cu.fetchall()
+            try:
+                tables = [t for (t,) in c.execute(
+                    "select name from sqlite_master where type='table' order by name")]
+            except (sqlite3.DatabaseError, UnicodeDecodeError) as e:
+                log.warning('state %s: could not list tables (%s)', sid, e); tables = []
+            for t in tables:
+                try:
+                    cu = c.execute('select * from "%s"' % t)
+                    schema[t] = [x[0] for x in cu.description]; st[t] = cu.fetchall()
+                except (sqlite3.DatabaseError, UnicodeDecodeError) as e:
+                    log.warning('state %s: table %r unreadable (%s), skipped for this state', sid, t, e)
+                    schema.setdefault(t, [])
             if sid == 'S00':
                 self.summary['schema_tables'] = len([t for t in st if not t.startswith('sqlite_')])
             rows_by_state.append((sid, ic, st)); c.close()
@@ -596,12 +623,17 @@ class Parser:
         final_rows = rows_by_state[-1][2]
         pk = {}; self.aff = {}
         c = sqlite3.connect('file:%s?mode=ro&immutable=1' % final, uri=True)
+        c.text_factory = lambda b: b.decode('utf-8', 'replace')
         for t in schema:
-            ti = c.execute('pragma table_info("%s")' % t).fetchall()
-            self.aff[t] = [self.affinity(x[2]) for x in ti]
-            pk[t] = [x[1] for x in ti if x[5] == 1 and x[2].upper() == 'INTEGER' and sum(1 for y in ti if y[5]) == 1]
-            sql = c.execute("select sql from sqlite_master where name=?", (t,)).fetchone()[0] or ''
-            if 'WITHOUT ROWID' in sql.upper(): pk[t] = []
+            try:
+                ti = c.execute('pragma table_info("%s")' % t).fetchall()
+                self.aff[t] = [self.affinity(x[2]) for x in ti]
+                pk[t] = [x[1] for x in ti if x[5] == 1 and x[2].upper() == 'INTEGER' and sum(1 for y in ti if y[5]) == 1]
+                sql = c.execute("select sql from sqlite_master where name=?", (t,)).fetchone()[0] or ''
+                if 'WITHOUT ROWID' in sql.upper(): pk[t] = []
+            except (sqlite3.DatabaseError, UnicodeDecodeError) as e:
+                log.warning('final state: could not read table_info for %r (%s), treating it as no primary key', t, e)
+                self.aff[t] = []; pk[t] = []
         c.close()
 
         # ---- history: rows seen in earlier states but not in the final state
